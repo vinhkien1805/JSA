@@ -1,11 +1,39 @@
 
-const RAPIDAPI_KEY = "b5ab209437msh9db9a067a46e6fbp12ca9bjsn3927e3a3c775";
-const RAPIDAPI_HOST = "imdb-top-100-movies.p.rapidapi.com";
-const BASE_URL = "https://imdb-top-100-movies.p.rapidapi.com";
-const HEADERS = {
-  "x-rapidapi-host": RAPIDAPI_HOST,
-  "x-rapidapi-key": RAPIDAPI_KEY,
+// use our own backend proxy when the page is served over HTTP
+// but when the file is opened directly we can't hit "/api" (origin null),
+// so fall back to calling the RapidAPI host directly and supply headers.
+const DIRECT_API_HOST = "https://imdb-top-100-movies.p.rapidapi.com";
+const DIRECT_HEADERS = {
+  "x-rapidapi-host": "imdb-top-100-movies.p.rapidapi.com",
+  // this key was included in your curl example
+  "x-rapidapi-key": "7ba35936d1msh0ebb7b5e711a5bbp133f62jsn01230fbc4489",
 };
+
+let useDirect = false;
+let BASE_API;
+if (window.location.protocol === "file:" || window.location.origin === "null") {
+  useDirect = true;
+  BASE_API = DIRECT_API_HOST;
+} else {
+  BASE_API = window.location.origin + "/api";
+}
+
+// helper that automatically adds headers when using the direct RapidAPI URL
+async function apiFetch(path) {
+  const url = BASE_API + path;
+  const opts = {};
+  if (useDirect) opts.headers = DIRECT_HEADERS;
+  return fetch(url, opts);
+}
+
+// a tiny helper used for client-side throttling
+function debounce(fn, delay) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delay);
+  };
+}
 
 // ===== State =====
 let currentView = "movies"; // "movies" | "series" | "movie-detail" | "series-detail"
@@ -63,7 +91,10 @@ function updateNav() {
 // ===== API =====
 async function fetchMovies() {
   if (moviesCache) return moviesCache;
-  const res = await fetch(`${BASE_URL}/`, { headers: HEADERS });
+  // when using direct host the list endpoint is just "/"
+  const path = useDirect ? "/" : "/movies";
+  const res = await apiFetch(path);
+  if (res.status === 429) throw new Error("Rate limit exceeded");
   if (!res.ok) throw new Error("Failed to fetch movies");
   moviesCache = await res.json();
   return moviesCache;
@@ -71,20 +102,26 @@ async function fetchMovies() {
 
 async function fetchSeries() {
   if (seriesCache) return seriesCache;
-  const res = await fetch(`${BASE_URL}/series/`, { headers: HEADERS });
+  const path = useDirect ? "/series/" : "/series";
+  const res = await apiFetch(path);
+  if (res.status === 429) throw new Error("Rate limit exceeded");
   if (!res.ok) throw new Error("Failed to fetch series");
   seriesCache = await res.json();
   return seriesCache;
 }
 
 async function fetchMovieDetail(id) {
-  const res = await fetch(`${BASE_URL}/${id}`, { headers: HEADERS });
+  const path = useDirect ? `/${id}` : `/movies/${id}`;
+  const res = await apiFetch(path);
+  if (res.status === 429) throw new Error("Rate limit exceeded");
   if (!res.ok) throw new Error("Failed to fetch movie detail");
   return res.json();
 }
 
 async function fetchSeriesDetail(id) {
-  const res = await fetch(`${BASE_URL}/series/${id}`, { headers: HEADERS });
+  const path = useDirect ? `/series/${id}` : `/series/${id}`; // API may not support series, but keep structure
+  const res = await apiFetch(path);
+  if (res.status === 429) throw new Error("Rate limit exceeded");
   if (!res.ok) throw new Error("Failed to fetch series detail");
   return res.json();
 }
@@ -129,12 +166,15 @@ async function renderGrid(type) {
     <div class="media-grid" id="media-grid">${renderSkeletonGrid()}</div>
   `;
 
-  // Search event
+  // Search event (debounced so we don't rerender on every keystroke)
   const searchInput = document.getElementById("search-input");
-  searchInput.addEventListener("input", (e) => {
-    searchQuery = e.target.value;
-    filterAndRenderCards(type);
-  });
+  searchInput.addEventListener(
+    "input",
+    debounce((e) => {
+      searchQuery = e.target.value;
+      filterAndRenderCards(type);
+    }, 250)
+  );
 
   try {
     const data = isMovie ? await fetchMovies() : await fetchSeries();
@@ -168,10 +208,11 @@ async function renderGrid(type) {
     // Store items globally for filtering
     window._currentItems = items;
     filterAndRenderCards(type);
-  } catch {
+  } catch (err) {
+    const msg = err.message || "Failed to load data";
     document.getElementById("media-grid").innerHTML = `
       <div class="empty-state" style="grid-column: 1 / -1;">
-        <p class="empty-state-text error-text">Failed to load data</p>
+        <p class="empty-state-text error-text">${msg}</p>
         <p class="empty-state-sub">Please try again later.</p>
       </div>`;
   }
@@ -368,10 +409,11 @@ async function renderDetail(id, type) {
         renderGrid("series");
       }
     });
-  } catch {
+  } catch (err) {
+    const msg = err.message || "Failed to load details";
     mainContent.innerHTML = `
       <div class="empty-state">
-        <p class="empty-state-text error-text">Failed to load details</p>
+        <p class="empty-state-text error-text">${msg}</p>
         <p class="empty-state-sub">Please try again later.</p>
         <button class="back-btn" id="back-btn" style="margin-top: 1rem;">
           ${icons.arrowLeft} Go back
